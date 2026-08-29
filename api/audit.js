@@ -12,6 +12,7 @@
 // unfinished jobs. This is intentional for the current lightweight phase.
 
 const crypto = require('crypto');
+const { Agent } = require('undici');
 
 const jobs = new Map();
 
