@@ -362,21 +362,124 @@ async function processAddress(address, chainId) {
   const model = document.getElementById('model').value.trim() || 'gpt-4o-mini';
   const systemPrompt = document.getElementById('systemPrompt').value;
 
-  const auditRes = await fetch(`${apiBase()}/api/audit`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-openai-key': document.getElementById('openaiKey').value.trim(),
-    },
-    body: JSON.stringify({
-      source: etherData.source,
-      systemPrompt,
-      model,
-      contractName: etherData.contractName,
+// Start the audit job.
+// This request should return almost immediately.
+const auditRes = await fetch(`${apiBase()}/api/audit`, {
+  method: 'POST',
+
+  headers: {
+    'Content-Type': 'application/json',
+    'x-openai-key': document.getElementById('openaiKey').value.trim(),
+  },
+
+  body: JSON.stringify({
+    source: etherData.source,
+    systemPrompt,
+    model,
+    contractName: etherData.contractName,
+    address,
+    llmUrl: document.getElementById('llmUrl').value.trim(),
+  }),
+});
+
+let auditJob;
+
+try {
+  auditJob = await auditRes.json();
+} catch {
+  logLine(
+    'err',
+    address,
+    `server returned a non-JSON response (HTTP ${auditRes.status})`
+  );
+  return null;
+}
+
+if (!auditRes.ok || auditJob.error) {
+  logLine('err', address, errText(auditJob.error));
+  return null;
+}
+
+const jobId = auditJob.jobId;
+
+if (!jobId) {
+  logLine('err', address, 'server did not return an audit job ID');
+  return null;
+}
+
+logLine(
+  'pending',
+  address,
+  'audit running...'
+);
+
+// Poll the job until it finishes.
+while (true) {
+
+  await sleep(2000);
+
+  const statusRes = await fetch(
+    `${apiBase()}/api/audit/${encodeURIComponent(jobId)}`
+  );
+
+  let statusData;
+
+  try {
+    statusData = await statusRes.json();
+  } catch {
+    logLine(
+      'err',
       address,
-      llmUrl: document.getElementById('llmUrl').value.trim(),
-    }),
-  });
+      `status request returned non-JSON response (HTTP ${statusRes.status})`
+    );
+    return null;
+  }
+
+  if (!statusRes.ok || statusData.error) {
+    logLine(
+      'err',
+      address,
+      errText(statusData.error)
+    );
+    return null;
+  }
+
+  if (statusData.status === 'running') {
+    logLine(
+      'pending',
+      address,
+      'LLM analysis running...'
+    );
+    continue;
+  }
+
+  if (statusData.status === 'failed') {
+    logLine(
+      'err',
+      address,
+      statusData.error || 'audit failed'
+    );
+    return null;
+  }
+
+  if (statusData.status === 'completed') {
+
+    logLine(
+      'ok',
+      address,
+      `done${statusData.truncated ? ' (source truncated)' : ''}`
+    );
+
+    return {
+      address,
+      chain: chainName,
+      contractName: etherData.contractName,
+      isProxy: etherData.isProxy,
+      implementation: etherData.implementation,
+      audit: statusData.result,
+    };
+  }
+}
   const auditData = await auditRes.json();
 
   if (auditData.error) {
