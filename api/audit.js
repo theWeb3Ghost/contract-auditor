@@ -22,6 +22,12 @@ const MAX_CHARS = 60000;
 // Keep jobs for 30 minutes.
 const JOB_TTL = 30 * 60 * 1000;
 
+const llmDispatcher = new Agent({
+  headersTimeout: 15 * 60 * 1000, // 15 minutes
+  bodyTimeout: 15 * 60 * 1000,    // 15 minutes
+  connectTimeout: 30 * 1000       // 30 seconds
+});
+
 function cleanupJobs() {
   const now = Date.now();
 
@@ -82,26 +88,45 @@ async function runAudit(jobId, data) {
       `[AUDIT ${jobId}] Sending request to LLM: ${endpoint}`
     );
 
-    const r = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: model || 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: systemPrompt
-          },
-          {
-            role: 'user',
-            content: userMessage
-          }
-        ],
-      }),
-    });
+const controller = new AbortController();
+
+const safetyTimeout = setTimeout(() => {
+  controller.abort();
+}, 11 * 60 * 1000); // 11 minutes
+
+let r;
+
+try {
+  r = await fetch(endpoint, {
+    method: 'POST',
+
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+
+    body: JSON.stringify({
+      model: model || 'gpt-4o-mini',
+
+      messages: [
+        {
+          role: 'system',
+          content: systemPrompt
+        },
+        {
+          role: 'user',
+          content: userMessage
+        }
+      ],
+    }),
+
+    dispatcher: llmDispatcher,
+
+    signal: controller.signal
+  });
+} finally {
+  clearTimeout(safetyTimeout);
+}
 
     const j = await r.json();
 
@@ -110,9 +135,18 @@ async function runAudit(jobId, data) {
   r.status
 );
 
+const responseContent =
+  j?.choices?.[0]?.message?.content ||
+  j?.choices?.[0]?.text ||
+  j?.output_text ||
+  '';
+
 console.log(
-  `[AUDIT ${jobId}] LLM RESPONSE:`,
-  JSON.stringify(j).slice(0, 10000)
+  `[AUDIT ${jobId}] LLM HTTP status: ${r.status}`
+);
+
+console.log(
+  `[AUDIT ${jobId}] LLM response length: ${String(responseContent).length} characters`
 );
 
     if (!r.ok || j.error) {
@@ -137,14 +171,19 @@ if (!text || !String(text).trim()) {
   throw new Error('LLM returned an empty audit response');
 }
 
-job.status = 'completed';
-job.result = String(text);
+job.result = String(text).trim();
 job.truncated = truncated;
 job.finishedAt = Date.now();
 
-    console.log(
-      `[AUDIT ${jobId}] Completed in ${job.finishedAt - job.startedAt}ms`
-    );
+console.log(
+  `[AUDIT ${jobId}] Audit result stored: ${job.result.length} characters`
+);
+
+job.status = 'completed';
+
+console.log(
+  `[AUDIT ${jobId}] Completed in ${job.finishedAt - job.startedAt}ms`
+);
 
   } catch (err) {
     job.status = 'failed';
