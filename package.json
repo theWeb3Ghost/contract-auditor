@@ -1,15 +1,18 @@
+
 {
   "name": "contract-auditor",
   "version": "1.0.0",
+  "description": "AI-powered Solidity smart contract security auditor",
   "private": true,
+  "main": "server.js",
+  "type": "commonjs",
   "engines": {
-    "node": ">=18"
+    "node": "22.x"
   },
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "undici": "^6.21.3"
+    "express": "^4.21.2"
   }
 }
