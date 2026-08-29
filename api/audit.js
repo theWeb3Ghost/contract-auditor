@@ -147,15 +147,32 @@ job.finishedAt = Date.now();
 
   } catch (err) {
     job.status = 'failed';
+
     job.error = String(
-      err && err.message ? err.message : err
+      err?.cause?.message ||
+      err?.message ||
+      err
     );
-    job.finishedAt = Date.now();
 
     console.error(
-      `[AUDIT ${jobId}] Failed:`,
-      job.error
+      `[AUDIT ${jobId}] ERROR DETAILS:`,
+      {
+        name: err?.name,
+        message: err?.message,
+        cause: err?.cause
+          ? {
+              name: err.cause.name,
+              message: err.cause.message,
+              code: err.cause.code,
+              errno: err.cause.errno,
+              syscall: err.cause.syscall,
+              hostname: err.cause.hostname
+            }
+          : null
+      }
     );
+
+    job.finishedAt = Date.now();
   }
 }
 
