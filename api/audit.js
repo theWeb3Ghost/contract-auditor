@@ -1,53 +1,86 @@
 // POST /api/audit
-// Body: { source, systemPrompt, model, contractName, address, llmUrl }
-// Sends the contract source to a chat-completions-style endpoint (OpenAI by default,
-// or any OpenAI-compatible provider via llmUrl) and returns the audit text.
+//
+// Starts an audit job immediately and returns a jobId.
+// The actual LLM request runs in the background.
+//
+// GET /api/audit/:jobId
+//
+// Returns the current job status/result.
+//
+// NOTE:
+// Jobs live in memory only. A Render restart/redeploy will remove
+// unfinished jobs. This is intentional for the current lightweight phase.
 
-module.exports = async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-openai-key');
-  if (req.method === 'OPTIONS') {
-    return res.status(204).end();
+const crypto = require('crypto');
+
+const jobs = new Map();
+
+const MAX_CHARS = 60000;
+
+// Clean old completed/failed jobs so memory doesn't grow forever.
+// Keep jobs for 30 minutes.
+const JOB_TTL = 30 * 60 * 1000;
+
+function cleanupJobs() {
+  const now = Date.now();
+
+  for (const [id, job] of jobs) {
+    if (
+      (job.status === 'completed' || job.status === 'failed') &&
+      now - job.finishedAt > JOB_TTL
+    ) {
+      jobs.delete(id);
+    }
   }
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'POST only' });
-  }
+}
 
-  const { source, systemPrompt, model, contractName, address, llmUrl } = req.body || {};
+setInterval(cleanupJobs, 5 * 60 * 1000).unref();
 
-  if (!source) {
-    return res.status(400).json({ error: 'source is required' });
-  }
-  if (!systemPrompt) {
-    return res.status(400).json({ error: 'systemPrompt is required' });
-  }
+async function runAudit(jobId, data) {
+  const job = jobs.get(jobId);
 
-  const apiKey = req.headers['x-openai-key'] || process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({ error: 'No OpenAI API key provided (header x-openai-key or OPENAI_API_KEY env var)' });
-  }
-
-  const MAX_CHARS = 60000;
-  let src = source;
-  let truncated = false;
-  if (src.length > MAX_CHARS) {
-    src = src.slice(0, MAX_CHARS);
-    truncated = true;
-  }
-
-  const userMessage =
-    `Contract: ${contractName || 'unknown'} (${address || 'unknown address'})\n\n` +
-    '```solidity\n' +
-    src +
-    '\n```' +
-    (truncated ? '\n\n[NOTE: source was truncated to fit context length]' : '');
-
-  const endpoint = (llmUrl && /^https?:\/\//.test(llmUrl))
-    ? llmUrl
-    : 'https://api.openai.com/v1/chat/completions';
+  if (!job) return;
 
   try {
+    job.status = 'running';
+    job.startedAt = Date.now();
+
+    const {
+      source,
+      systemPrompt,
+      model,
+      contractName,
+      address,
+      llmUrl,
+      apiKey
+    } = data;
+
+    let src = source;
+    let truncated = false;
+
+    if (src.length > MAX_CHARS) {
+      src = src.slice(0, MAX_CHARS);
+      truncated = true;
+    }
+
+    const userMessage =
+      `Contract: ${contractName || 'unknown'} (${address || 'unknown address'})\n\n` +
+      '```solidity\n' +
+      src +
+      '\n```' +
+      (truncated
+        ? '\n\n[NOTE: source was truncated to fit context length]'
+        : '');
+
+    const endpoint =
+      llmUrl && /^https?:\/\//.test(llmUrl)
+        ? llmUrl
+        : 'https://api.openai.com/v1/chat/completions';
+
+    console.log(
+      `[AUDIT ${jobId}] Sending request to LLM: ${endpoint}`
+    );
+
     const r = await fetch(endpoint, {
       method: 'POST',
       headers: {
@@ -57,24 +90,179 @@ module.exports = async function handler(req, res) {
       body: JSON.stringify({
         model: model || 'gpt-4o-mini',
         messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userMessage },
+          {
+            role: 'system',
+            content: systemPrompt
+          },
+          {
+            role: 'user',
+            content: userMessage
+          }
         ],
       }),
     });
 
     const j = await r.json();
 
-    if (j.error) {
-      return res.status(502).json({ error: j.error.message || 'OpenAI API error' });
+    if (!r.ok || j.error) {
+      throw new Error(
+        j?.error?.message ||
+        `LLM request failed with HTTP ${r.status}`
+      );
     }
 
-    const text = j.choices && j.choices[0] && j.choices[0].message
-      ? j.choices[0].message.content
-      : '';
+    const text =
+      j.choices &&
+      j.choices[0] &&
+      j.choices[0].message
+        ? j.choices[0].message.content
+        : '';
 
-    return res.json({ result: text, truncated });
+    job.status = 'completed';
+    job.result = text;
+    job.truncated = truncated;
+    job.finishedAt = Date.now();
+
+    console.log(
+      `[AUDIT ${jobId}] Completed in ${job.finishedAt - job.startedAt}ms`
+    );
+
   } catch (err) {
-    return res.status(500).json({ error: String(err && err.message ? err.message : err) });
+    job.status = 'failed';
+    job.error = String(
+      err && err.message ? err.message : err
+    );
+    job.finishedAt = Date.now();
+
+    console.error(
+      `[AUDIT ${jobId}] Failed:`,
+      job.error
+    );
   }
 }
+
+module.exports = async function handler(req, res) {
+
+  res.setHeader('Access-Control-Allow-Origin', '*');
+
+  res.setHeader(
+    'Access-Control-Allow-Methods',
+    'GET, POST, OPTIONS'
+  );
+
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Content-Type, x-openai-key'
+  );
+
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+
+  // ------------------------------------------
+  // START AUDIT
+  // ------------------------------------------
+
+  if (req.method === 'POST') {
+
+    const {
+      source,
+      systemPrompt,
+      model,
+      contractName,
+      address,
+      llmUrl
+    } = req.body || {};
+
+    if (!source) {
+      return res.status(400).json({
+        error: 'source is required'
+      });
+    }
+
+    if (!systemPrompt) {
+      return res.status(400).json({
+        error: 'systemPrompt is required'
+      });
+    }
+
+    const apiKey =
+      req.headers['x-openai-key'] ||
+      process.env.OPENAI_API_KEY;
+
+    if (!apiKey) {
+      return res.status(500).json({
+        error:
+          'No OpenAI API key provided (header x-openai-key or OPENAI_API_KEY env var)'
+      });
+    }
+
+    const jobId = crypto.randomUUID();
+
+    jobs.set(jobId, {
+      status: 'queued',
+      result: null,
+      error: null,
+      truncated: false,
+      createdAt: Date.now(),
+      startedAt: null,
+      finishedAt: null
+    });
+
+    // IMPORTANT:
+    // Return immediately.
+    res.status(202).json({
+      jobId,
+      status: 'queued'
+    });
+
+    // Start the real audit AFTER responding.
+    runAudit(jobId, {
+      source,
+      systemPrompt,
+      model,
+      contractName,
+      address,
+      llmUrl,
+      apiKey
+    });
+
+    return;
+  }
+
+  // ------------------------------------------
+  // CHECK AUDIT STATUS
+  // ------------------------------------------
+
+  if (req.method === 'GET') {
+
+    const jobId = req.params.jobId;
+
+    const job = jobs.get(jobId);
+
+    if (!job) {
+      return res.status(404).json({
+        error: 'Audit job not found'
+      });
+    }
+
+    return res.json({
+      jobId,
+      status: job.status,
+      result: job.status === 'completed'
+        ? job.result
+        : null,
+      truncated: job.truncated,
+      error: job.status === 'failed'
+        ? job.error
+        : null,
+      createdAt: job.createdAt,
+      startedAt: job.startedAt,
+      finishedAt: job.finishedAt
+    });
+  }
+
+  return res.status(405).json({
+    error: 'GET or POST only'
+  });
+};
