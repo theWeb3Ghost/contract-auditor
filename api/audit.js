@@ -112,16 +112,24 @@ async function runAudit(jobId, data) {
     }
 
     const text =
-      j.choices &&
-      j.choices[0] &&
-      j.choices[0].message
-        ? j.choices[0].message.content
-        : '';
+  j?.choices?.[0]?.message?.content ||
+  j?.choices?.[0]?.text ||
+  j?.output_text ||
+  '';
 
-    job.status = 'completed';
-    job.result = text;
-    job.truncated = truncated;
-    job.finishedAt = Date.now();
+if (!text || !String(text).trim()) {
+  console.error(
+    `[AUDIT ${jobId}] LLM returned empty response:`,
+    JSON.stringify(j).slice(0, 5000)
+  );
+
+  throw new Error('LLM returned an empty audit response');
+}
+
+job.status = 'completed';
+job.result = String(text);
+job.truncated = truncated;
+job.finishedAt = Date.now();
 
     console.log(
       `[AUDIT ${jobId}] Completed in ${job.finishedAt - job.startedAt}ms`
