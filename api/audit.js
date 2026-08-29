@@ -104,6 +104,16 @@ async function runAudit(jobId, data) {
 
     const j = await r.json();
 
+    console.log(
+  `[AUDIT ${jobId}] LLM HTTP status:`,
+  r.status
+);
+
+console.log(
+  `[AUDIT ${jobId}] LLM RESPONSE:`,
+  JSON.stringify(j).slice(0, 10000)
+);
+
     if (!r.ok || j.error) {
       throw new Error(
         j?.error?.message ||
