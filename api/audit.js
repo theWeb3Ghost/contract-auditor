@@ -1,8 +1,7 @@
 // POST /api/audit
-// Body: { source, systemPrompt, model, contractName, address }
-// Sends the contract source to OpenAI's chat completions endpoint and returns the audit text.
-// This runs server-side specifically so we sidestep the chat completions endpoint's
-// inconsistent CORS behavior when called directly from browsers.
+// Body: { source, systemPrompt, model, contractName, address, llmUrl }
+// Sends the contract source to a chat-completions-style endpoint (OpenAI by default,
+// or any OpenAI-compatible provider via llmUrl) and returns the audit text.
 
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -15,7 +14,7 @@ module.exports = async function handler(req, res) {
     return res.status(405).json({ error: 'POST only' });
   }
 
-  const { source, systemPrompt, model, contractName, address } = req.body || {};
+  const { source, systemPrompt, model, contractName, address, llmUrl } = req.body || {};
 
   if (!source) {
     return res.status(400).json({ error: 'source is required' });
@@ -44,8 +43,12 @@ module.exports = async function handler(req, res) {
     '\n```' +
     (truncated ? '\n\n[NOTE: source was truncated to fit context length]' : '');
 
+  const endpoint = (llmUrl && /^https?:\/\//.test(llmUrl))
+    ? llmUrl
+    : 'https://api.openai.com/v1/chat/completions';
+
   try {
-    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+    const r = await fetch(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -74,4 +77,4 @@ module.exports = async function handler(req, res) {
   } catch (err) {
     return res.status(500).json({ error: String(err && err.message ? err.message : err) });
   }
-          }
+}
