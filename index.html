@@ -245,7 +245,7 @@ document.getElementById('openaiKey').addEventListener('input', (e) => {
 
 function apiBase() {
   const v = document.getElementById('baseUrl').value.trim();
-  return v.replace(/\/+$/, ''); // strip trailing slash(es)
+  return v.replace(/\/+$/, '');
 }
 
 document.getElementById('systemPrompt').addEventListener('input', (e) => {
@@ -295,6 +295,13 @@ function parseAddresses(raw) {
     .filter(Boolean);
 }
 
+function errText(e) {
+  if (!e) return 'unknown error';
+  if (typeof e === 'string') return e;
+  if (e.message) return e.message;
+  try { return JSON.stringify(e); } catch { return String(e); }
+}
+
 function logLine(status, addr, msg) {
   const log = document.getElementById('log');
   const el = document.createElement('div');
@@ -319,10 +326,16 @@ async function processAddress(address, chainId) {
   const etherRes = await fetch(`${apiBase()}/api/etherscan?address=${address}&chainId=${chainId}`, {
     headers: { 'x-etherscan-key': document.getElementById('etherscanKey').value.trim() },
   });
-  const etherData = await etherRes.json();
+  let etherData;
+  try {
+    etherData = await etherRes.json();
+  } catch {
+    logLine('err', address, `server returned a non-JSON response (HTTP ${etherRes.status}) — check the deployed function logs`);
+    return null;
+  }
 
   if (etherData.error) {
-    logLine('err', address, etherData.error);
+    logLine('err', address, errText(etherData.error));
     return null;
   }
   if (!etherData.verified) {
@@ -357,7 +370,7 @@ async function processAddress(address, chainId) {
   const auditData = await auditRes.json();
 
   if (auditData.error) {
-    logLine('err', address, auditData.error);
+    logLine('err', address, errText(auditData.error));
     return null;
   }
 
@@ -407,7 +420,7 @@ document.getElementById('runBtn').addEventListener('click', async () => {
     } catch (e) {
       logLine('err', addr, String(e.message || e));
     }
-    await sleep(300); // stay under Etherscan's free-tier rate limit
+    await sleep(300);
   }
 
   document.getElementById('runBtn').disabled = false;
