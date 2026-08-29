@@ -21,6 +21,7 @@ app.use((req, res, next) => {
 });
 
 app.get('/api/etherscan', etherscanHandler);
+app.get('/api/audit/:jobId', auditHandler);
 app.post('/api/audit', auditHandler);
 
 // Serves index.html (and anything else placed alongside it) as static files.
