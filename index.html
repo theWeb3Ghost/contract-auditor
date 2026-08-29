@@ -147,14 +147,18 @@
 
   <div class="panel">
     <h2>Backend</h2>
-    <label for="baseUrl">API base URL (leave blank if this page and the API are on the same domain)</label>
+    <label for="baseUrl">This app's own API base URL (leave blank if this page and its /api are on the same domain — normally true, leave it blank)</label>
     <input type="text" id="baseUrl" placeholder="https://your-project.vercel.app" />
-    <div class="hint">Only needed if this page is hosted somewhere other than the Vercel deployment itself — e.g. GitHub Pages calling a separate Vercel backend.</div>
+    <div class="hint">This is NOT where the AI model lives. It's only for this page's own backend, and only needed if this page is hosted somewhere other than the Vercel deployment itself (e.g. GitHub Pages calling a separate Vercel backend).</div>
+
+    <label for="llmUrl">LLM endpoint URL (chat completions)</label>
+    <input type="text" id="llmUrl" placeholder="https://api.openai.com/v1/chat/completions" />
+    <div class="hint">Full URL of the chat-completions endpoint the audit call is sent to. Defaults to OpenAI's. Use this field for OpenAI-compatible providers, e.g. https://kiosapi.com/v1/chat/completions.</div>
 
     <label for="etherscanKey">Etherscan API key</label>
     <input type="text" id="etherscanKey" placeholder="Etherscan API key" autocomplete="off" />
 
-    <label for="openaiKey">OpenAI API key</label>
+    <label for="openaiKey">LLM provider API key</label>
     <input type="text" id="openaiKey" placeholder="sk-..." autocomplete="off" />
     <div class="hint">Keys are saved only in this browser's local storage on this device — never sent to GitHub, never synced. If you clear browser data or switch devices, you'll need to re-enter them. Anyone with access to this unlocked device and browser could read them via dev tools, so don't use this on a shared device.</div>
   </div>
@@ -193,7 +197,7 @@
 
   <div class="panel">
     <h2>Audit prompt</h2>
-    <label for="model">OpenAI model</label>
+    <label for="model">Model name</label>
     <input type="text" id="model" value="gpt-4o-mini" />
     <label for="systemPrompt">System prompt (edit this to change what gets audited for)</label>
     <textarea id="systemPrompt"></textarea>
@@ -228,6 +232,8 @@ document.getElementById('model').value =
   localStorage.getItem('auditor_model') || 'gpt-4o-mini';
 document.getElementById('baseUrl').value =
   localStorage.getItem('auditor_base_url') || '';
+document.getElementById('llmUrl').value =
+  localStorage.getItem('auditor_llm_url') || 'https://api.openai.com/v1/chat/completions';
 document.getElementById('etherscanKey').value =
   localStorage.getItem('auditor_etherscan_key') || '';
 document.getElementById('openaiKey').value =
@@ -235,6 +241,9 @@ document.getElementById('openaiKey').value =
 
 document.getElementById('baseUrl').addEventListener('input', (e) => {
   localStorage.setItem('auditor_base_url', e.target.value.trim());
+});
+document.getElementById('llmUrl').addEventListener('input', (e) => {
+  localStorage.setItem('auditor_llm_url', e.target.value.trim());
 });
 document.getElementById('etherscanKey').addEventListener('input', (e) => {
   localStorage.setItem('auditor_etherscan_key', e.target.value.trim());
@@ -365,6 +374,7 @@ async function processAddress(address, chainId) {
       model,
       contractName: etherData.contractName,
       address,
+      llmUrl: document.getElementById('llmUrl').value.trim(),
     }),
   });
   const auditData = await auditRes.json();
@@ -476,4 +486,4 @@ function triggerDownload(blob, filename) {
 }
 </script>
 </body>
-</html>
+    </html>
