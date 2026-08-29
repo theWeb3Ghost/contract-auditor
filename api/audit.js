@@ -4,7 +4,7 @@
 // This runs server-side specifically so we sidestep the chat completions endpoint's
 // inconsistent CORS behavior when called directly from browsers.
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-openai-key');
@@ -74,4 +74,4 @@ export default async function handler(req, res) {
   } catch (err) {
     return res.status(500).json({ error: String(err && err.message ? err.message : err) });
   }
-}
+          }
