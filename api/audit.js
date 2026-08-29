@@ -1,60 +1,123 @@
 
-// POST /api/audit
+// api/audit.js
 //
-// Starts an audit job immediately and returns a jobId.
-// The actual LLM request runs in the background.
+// POST /api/audit
+// Starts an audit job and immediately returns a jobId.
 //
 // GET /api/audit/:jobId
+// Returns the current status/result of an audit job.
 //
-// Returns the current job status/result.
-//
-// NOTE:
-// Jobs live in memory only. A Render restart/redeploy will remove
-// unfinished jobs. This is intentional for the current lightweight phase.
+// Jobs are stored in memory for now.
+// A Render restart/redeploy will clear existing jobs.
 
 const crypto = require('crypto');
+const { fetch, Agent } = require('undici');
+
+
+// ============================================================
+// CONFIGURATION
+// ============================================================
 
 const jobs = new Map();
 
+// Maximum Solidity source characters sent to the LLM
 const MAX_CHARS = 60000;
 
-// Keep completed/failed jobs for 30 minutes
+// Keep completed jobs for 30 minutes
 const JOB_TTL = 30 * 60 * 1000;
 
+// LLM timeout: 10 minutes
+const LLM_TIMEOUT = 10 * 60 * 1000;
 
-// ------------------------------------------
-// CLEAN OLD JOBS
-// ------------------------------------------
+
+// ============================================================
+// UNDICI AGENT
+// ============================================================
+//
+// This Agent is specifically for long-running LLM requests.
+//
+// headersTimeout:
+// Maximum time waiting for response headers.
+//
+// bodyTimeout:
+// Maximum time allowed while receiving the response body.
+//
+// connect.timeout:
+// Maximum time allowed to establish a connection.
+//
+
+const llmDispatcher = new Agent({
+  headersTimeout: LLM_TIMEOUT,
+  bodyTimeout: LLM_TIMEOUT,
+
+  connect: {
+    timeout: 30000
+  }
+});
+
+
+// ============================================================
+// CLEANUP OLD JOBS
+// ============================================================
 
 function cleanupJobs() {
   const now = Date.now();
 
-  for (const [id, job] of jobs) {
+  for (const [jobId, job] of jobs.entries()) {
+    const isFinished =
+      job.status === 'completed' ||
+      job.status === 'failed';
+
     if (
-      (job.status === 'completed' || job.status === 'failed') &&
+      isFinished &&
       job.finishedAt &&
       now - job.finishedAt > JOB_TTL
     ) {
-      jobs.delete(id);
+      jobs.delete(jobId);
+
+      console.log(
+        `[AUDIT ${jobId}] Old job removed from memory`
+      );
     }
   }
 }
 
-setInterval(cleanupJobs, 5 * 60 * 1000).unref();
+
+// Run cleanup every 5 minutes
+const cleanupInterval = setInterval(
+  cleanupJobs,
+  5 * 60 * 1000
+);
+
+// Don't keep Node alive because of this interval
+cleanupInterval.unref();
 
 
-// ------------------------------------------
-// RUN AUDIT IN BACKGROUND
-// ------------------------------------------
+// ============================================================
+// RUN AUDIT
+// ============================================================
 
 async function runAudit(jobId, data) {
+
   const job = jobs.get(jobId);
 
-  if (!job) return;
+  if (!job) {
+    console.error(
+      `[AUDIT ${jobId}] Job not found`
+    );
+    return;
+  }
+
 
   try {
+
+    // --------------------------------------------------------
+    // UPDATE JOB STATUS
+    // --------------------------------------------------------
+
     job.status = 'running';
     job.startedAt = Date.now();
+
 
     const {
       source,
@@ -67,9 +130,20 @@ async function runAudit(jobId, data) {
     } = data;
 
 
-    // ------------------------------------------
-    // PREPARE CONTRACT SOURCE
-    // ------------------------------------------
+    // --------------------------------------------------------
+    // VALIDATE SOURCE
+    // --------------------------------------------------------
+
+    if (!source || typeof source !== 'string') {
+      throw new Error(
+        'Invalid or empty Solidity source code'
+      );
+    }
+
+
+    // --------------------------------------------------------
+    // TRUNCATE LARGE CONTRACTS
+    // --------------------------------------------------------
 
     let src = source;
     let truncated = false;
@@ -77,60 +151,128 @@ async function runAudit(jobId, data) {
     if (src.length > MAX_CHARS) {
       src = src.slice(0, MAX_CHARS);
       truncated = true;
+
+      console.log(
+        `[AUDIT ${jobId}] Source truncated from ${source.length} to ${MAX_CHARS} characters`
+      );
     }
 
 
-    const userMessage =
-      `Contract: ${contractName || 'unknown'} (${address || 'unknown address'})\n\n` +
-      '```solidity\n' +
-      src +
-      '\n```' +
-      (
-        truncated
-          ? '\n\n[NOTE: source was truncated to fit context length]'
-          : ''
-      );
+    // --------------------------------------------------------
+    // BUILD USER MESSAGE
+    // --------------------------------------------------------
+
+    const userMessage = `
+You are auditing the following Solidity smart contract.
+
+Contract Name: ${contractName || 'Unknown'}
+
+Contract Address: ${address || 'Not provided'}
+
+SOURCE CODE:
+
+\`\`\`solidity
+${src}
+\`\`\`
+
+${truncated
+  ? '[WARNING: Source code was truncated because it exceeded the maximum allowed size.]'
+  : ''
+}
+`;
 
 
-    // ------------------------------------------
-    // DETERMINE LLM ENDPOINT
-    // ------------------------------------------
+    // --------------------------------------------------------
+    // DETERMINE ENDPOINT
+    // --------------------------------------------------------
 
     const endpoint =
-      llmUrl && /^https?:\/\//.test(llmUrl)
+      llmUrl &&
+      typeof llmUrl === 'string' &&
+      /^https?:\/\//.test(llmUrl)
         ? llmUrl
         : 'https://api.openai.com/v1/chat/completions';
 
 
+    // --------------------------------------------------------
+    // LOG REQUEST DETAILS
+    // --------------------------------------------------------
+
     console.log(
-      `[AUDIT ${jobId}] Sending request to LLM: ${endpoint}`
+      `[AUDIT ${jobId}] ========================================`
+    );
+
+    console.log(
+      `[AUDIT ${jobId}] Starting LLM audit`
+    );
+
+    console.log(
+      `[AUDIT ${jobId}] Endpoint: ${endpoint}`
+    );
+
+    console.log(
+      `[AUDIT ${jobId}] Model: ${model || 'gpt-4o-mini'}`
+    );
+
+    console.log(
+      `[AUDIT ${jobId}] Contract: ${contractName || 'Unknown'}`
+    );
+
+    console.log(
+      `[AUDIT ${jobId}] Source length: ${src.length} characters`
     );
 
     console.log(
       `[AUDIT ${jobId}] Node version: ${process.version}`
     );
 
+    console.log(
+      `[AUDIT ${jobId}] ========================================`
+    );
 
-    // ------------------------------------------
-    // REQUEST TIMEOUT
-    // ------------------------------------------
+
+    // --------------------------------------------------------
+    // CREATE ABORT CONTROLLER
+    // --------------------------------------------------------
+    //
+    // This is an additional safety timeout.
+    // Undici handles connection/body/header timeouts,
+    // while AbortController provides an overall request limit.
+    //
 
     const controller = new AbortController();
 
-    const safetyTimeout = setTimeout(() => {
+    const timeoutId = setTimeout(() => {
+
+      console.error(
+        `[AUDIT ${jobId}] Overall request timeout reached after ${LLM_TIMEOUT}ms`
+      );
+
       controller.abort();
-    }, 120000);
+
+    }, LLM_TIMEOUT);
 
 
-    // ------------------------------------------
+    // --------------------------------------------------------
     // SEND REQUEST TO LLM
-    // ------------------------------------------
+    // --------------------------------------------------------
 
     let response;
 
     try {
+
+      console.log(
+        `[AUDIT ${jobId}] Sending request to LLM: ${endpoint}`
+      );
+
+
       response = await fetch(endpoint, {
+
         method: 'POST',
+
+        dispatcher: llmDispatcher,
+
+        signal: controller.signal,
 
         headers: {
           'Content-Type': 'application/json',
@@ -139,160 +281,255 @@ async function runAudit(jobId, data) {
         },
 
         body: JSON.stringify({
+
           model: model || 'gpt-4o-mini',
 
           messages: [
+
             {
               role: 'system',
               content: systemPrompt
             },
+
             {
               role: 'user',
               content: userMessage
             }
-          ]
-        }),
 
-        signal: controller.signal
+          ]
+
+        })
+
       });
 
     } finally {
-      clearTimeout(safetyTimeout);
+
+      // Always clear timeout when fetch finishes
+      clearTimeout(timeoutId);
+
     }
 
 
-    // ------------------------------------------
-    // READ RAW RESPONSE FIRST
-    // ------------------------------------------
+    // --------------------------------------------------------
+    // LOG RESPONSE STATUS
+    // --------------------------------------------------------
 
     console.log(
-      `[AUDIT ${jobId}] LLM HTTP status: ${response.status}`
+      `[AUDIT ${jobId}] LLM response received`
     );
 
+    console.log(
+      `[AUDIT ${jobId}] HTTP status: ${response.status}`
+    );
+
+    console.log(
+      `[AUDIT ${jobId}] HTTP status text: ${response.statusText}`
+    );
+
+
+    // --------------------------------------------------------
+    // READ RESPONSE AS TEXT FIRST
+    // --------------------------------------------------------
+    //
+    // We read raw text before JSON parsing so we can debug
+    // non-JSON responses from proxies/providers.
+    //
 
     const rawText = await response.text();
 
 
     console.log(
-      `[AUDIT ${jobId}] LLM response preview: ${rawText.slice(0, 500)}`
+      `[AUDIT ${jobId}] Response length: ${rawText.length} characters`
+    );
+
+    console.log(
+      `[AUDIT ${jobId}] Response preview: ${rawText.slice(0, 500)}`
     );
 
 
-    // ------------------------------------------
+    // --------------------------------------------------------
     // HANDLE HTTP ERRORS
-    // ------------------------------------------
+    // --------------------------------------------------------
 
     if (!response.ok) {
+
       throw new Error(
-        `LLM request failed with HTTP ${response.status}: ` +
-        rawText.slice(0, 1000)
+        `LLM API returned HTTP ${response.status}: ${rawText.slice(0, 2000)}`
       );
+
     }
 
 
-    // ------------------------------------------
+    // --------------------------------------------------------
     // PARSE JSON
-    // ------------------------------------------
+    // --------------------------------------------------------
 
     let json;
 
     try {
+
       json = JSON.parse(rawText);
 
     } catch (parseError) {
+
       console.error(
-        `[AUDIT ${jobId}] Failed to parse LLM response as JSON`
+        `[AUDIT ${jobId}] Invalid JSON received from LLM`
       );
 
       throw new Error(
-        `LLM returned invalid JSON: ${rawText.slice(0, 1000)}`
+        `LLM returned invalid JSON: ${rawText.slice(0, 2000)}`
       );
+
     }
 
 
-    // ------------------------------------------
-    // HANDLE API ERRORS
-    // ------------------------------------------
+    // --------------------------------------------------------
+    // HANDLE API ERROR OBJECT
+    // --------------------------------------------------------
 
     if (json.error) {
+
+      console.error(
+        `[AUDIT ${jobId}] LLM API error:`,
+        json.error
+      );
+
       throw new Error(
         json.error.message ||
         JSON.stringify(json.error)
       );
+
     }
 
 
-    // ------------------------------------------
+    // --------------------------------------------------------
     // EXTRACT LLM RESPONSE
-    // ------------------------------------------
+    // --------------------------------------------------------
 
-    const text =
+    const result =
       json?.choices?.[0]?.message?.content ||
       json?.choices?.[0]?.text ||
       json?.output_text ||
       '';
 
 
-    if (!text || !String(text).trim()) {
+    // --------------------------------------------------------
+    // VALIDATE RESULT
+    // --------------------------------------------------------
+
+    if (!result || !String(result).trim()) {
+
       console.error(
-        `[AUDIT ${jobId}] LLM returned empty response:`,
+        `[AUDIT ${jobId}] Empty LLM response`
+      );
+
+      console.error(
+        `[AUDIT ${jobId}] Full response structure:`,
         JSON.stringify(json).slice(0, 5000)
       );
 
-      throw new Error('LLM returned an empty audit response');
+      throw new Error(
+        'LLM returned an empty audit response'
+      );
+
     }
 
 
-    // ------------------------------------------
+    // --------------------------------------------------------
     // SAVE SUCCESSFUL RESULT
-    // ------------------------------------------
+    // --------------------------------------------------------
 
-    job.result = String(text).trim();
+    job.status = 'completed';
+
+    job.result = String(result).trim();
+
+    job.error = null;
 
     job.truncated = truncated;
 
     job.finishedAt = Date.now();
 
-    job.status = 'completed';
+
+    const duration =
+      job.finishedAt - job.startedAt;
 
 
     console.log(
-      `[AUDIT ${jobId}] Audit result stored: ${job.result.length} characters`
+      `[AUDIT ${jobId}] ========================================`
     );
 
     console.log(
-      `[AUDIT ${jobId}] Completed in ${job.finishedAt - job.startedAt}ms`
+      `[AUDIT ${jobId}] AUDIT COMPLETED SUCCESSFULLY`
+    );
+
+    console.log(
+      `[AUDIT ${jobId}] Result length: ${job.result.length} characters`
+    );
+
+    console.log(
+      `[AUDIT ${jobId}] Duration: ${duration}ms (${(duration / 1000).toFixed(2)} seconds)`
+    );
+
+    console.log(
+      `[AUDIT ${jobId}] ========================================`
     );
 
 
   } catch (err) {
 
-    // ------------------------------------------
-    // HANDLE ERRORS
-    // ------------------------------------------
+    // --------------------------------------------------------
+    // MARK JOB AS FAILED
+    // --------------------------------------------------------
 
     job.status = 'failed';
 
     job.finishedAt = Date.now();
 
 
-    if (err?.name === 'AbortError') {
+    // --------------------------------------------------------
+    // DETERMINE ERROR MESSAGE
+    // --------------------------------------------------------
+
+    if (
+      err?.name === 'AbortError' ||
+      err?.name === 'TimeoutError'
+    ) {
+
       job.error =
-        'The LLM request timed out after 2 minutes.';
+        `LLM request timed out after ${LLM_TIMEOUT / 60000} minutes.`;
+
     } else {
+
       job.error = String(
         err?.cause?.message ||
         err?.message ||
-        err
+        err ||
+        'Unknown audit error'
       );
+
     }
 
+
+    // --------------------------------------------------------
+    // DETAILED ERROR LOGGING
+    // --------------------------------------------------------
+
+    console.error(
+      `[AUDIT ${jobId}] ========================================`
+    );
+
+    console.error(
+      `[AUDIT ${jobId}] AUDIT FAILED`
+    );
 
     console.error(
       `[AUDIT ${jobId}] ERROR DETAILS:`,
       {
         name: err?.name,
+
         message: err?.message,
+
+        code: err?.code,
 
         cause: err?.cause
           ? {
@@ -308,19 +545,26 @@ async function runAudit(jobId, data) {
         stack: err?.stack
       }
     );
+
+    console.error(
+      `[AUDIT ${jobId}] ========================================`
+    );
+
   }
+
 }
 
 
-// ------------------------------------------
-// API HANDLER
-// ------------------------------------------
+// ============================================================
+// EXPRESS API HANDLER
+// ============================================================
 
-module.exports = async function handler(req, res) {
+module.exports = async function auditHandler(req, res) {
 
-  // ------------------------------------------
-  // CORS
-  // ------------------------------------------
+
+  // ----------------------------------------------------------
+  // CORS HEADERS
+  // ----------------------------------------------------------
 
   res.setHeader(
     'Access-Control-Allow-Origin',
@@ -338,14 +582,21 @@ module.exports = async function handler(req, res) {
   );
 
 
+  // ----------------------------------------------------------
+  // HANDLE OPTIONS
+  // ----------------------------------------------------------
+
   if (req.method === 'OPTIONS') {
+
     return res.status(204).end();
+
   }
 
 
-  // ==========================================
-  // POST - START AUDIT
-  // ==========================================
+  // ==========================================================
+  // POST /api/audit
+  // START A NEW AUDIT
+  // ==========================================================
 
   if (req.method === 'POST') {
 
@@ -359,31 +610,44 @@ module.exports = async function handler(req, res) {
     } = req.body || {};
 
 
-    // ------------------------------------------
+    // --------------------------------------------------------
     // VALIDATE SOURCE
-    // ------------------------------------------
+    // --------------------------------------------------------
 
     if (!source) {
+
       return res.status(400).json({
         error: 'source is required'
       });
+
     }
 
 
-    // ------------------------------------------
+    if (typeof source !== 'string') {
+
+      return res.status(400).json({
+        error: 'source must be a string'
+      });
+
+    }
+
+
+    // --------------------------------------------------------
     // VALIDATE SYSTEM PROMPT
-    // ------------------------------------------
+    // --------------------------------------------------------
 
     if (!systemPrompt) {
+
       return res.status(400).json({
         error: 'systemPrompt is required'
       });
+
     }
 
 
-    // ------------------------------------------
+    // --------------------------------------------------------
     // GET API KEY
-    // ------------------------------------------
+    // --------------------------------------------------------
 
     const apiKey =
       req.headers['x-openai-key'] ||
@@ -391,90 +655,132 @@ module.exports = async function handler(req, res) {
 
 
     if (!apiKey) {
+
       return res.status(500).json({
         error:
-          'No API key provided. Use x-openai-key header or OPENAI_API_KEY environment variable.'
+          'No API key provided. Set x-openai-key or OPENAI_API_KEY.'
       });
+
     }
 
 
-    // ------------------------------------------
+    // --------------------------------------------------------
     // CREATE JOB
-    // ------------------------------------------
+    // --------------------------------------------------------
 
     const jobId = crypto.randomUUID();
 
 
     jobs.set(jobId, {
+
       status: 'queued',
+
       result: null,
+
       error: null,
+
       truncated: false,
 
       createdAt: Date.now(),
+
       startedAt: null,
+
       finishedAt: null
+
     });
 
 
     console.log(
-      `[AUDIT ${jobId}] Job created`
+      `[AUDIT ${jobId}] New audit job created`
     );
 
 
-    // ------------------------------------------
-    // RETURN JOB ID IMMEDIATELY
-    // ------------------------------------------
+    // --------------------------------------------------------
+    // RETURN IMMEDIATELY
+    // --------------------------------------------------------
+    //
+    // Important:
+    // The frontend receives the jobId immediately.
+    // The long LLM audit continues in the background.
+    //
 
     res.status(202).json({
+
       jobId,
+
       status: 'queued'
+
     });
 
 
-    // ------------------------------------------
+    // --------------------------------------------------------
     // RUN AUDIT IN BACKGROUND
-    // ------------------------------------------
+    // --------------------------------------------------------
 
     runAudit(jobId, {
+
       source,
+
       systemPrompt,
+
       model,
+
       contractName,
+
       address,
+
       llmUrl,
+
       apiKey
+
     }).catch((err) => {
+
       console.error(
         `[AUDIT ${jobId}] Unexpected background error:`,
         err
       );
+
     });
 
 
     return;
+
   }
 
 
-  // ==========================================
-  // GET - CHECK AUDIT STATUS
-  // ==========================================
+  // ==========================================================
+  // GET /api/audit/:jobId
+  // CHECK AUDIT STATUS
+  // ==========================================================
 
   if (req.method === 'GET') {
 
     const jobId = req.params.jobId;
 
+
+    if (!jobId) {
+
+      return res.status(400).json({
+        error: 'jobId is required'
+      });
+
+    }
+
+
     const job = jobs.get(jobId);
 
 
     if (!job) {
+
       return res.status(404).json({
         error: 'Audit job not found'
       });
+
     }
 
 
-    return res.json({
+    return res.status(200).json({
+
       jobId,
 
       status: job.status,
@@ -484,28 +790,30 @@ module.exports = async function handler(req, res) {
           ? job.result
           : null,
 
-      truncated: job.truncated,
-
       error:
         job.status === 'failed'
           ? job.error
           : null,
+
+      truncated: job.truncated,
 
       createdAt: job.createdAt,
 
       startedAt: job.startedAt,
 
       finishedAt: job.finishedAt
+
     });
+
   }
 
 
-  // ==========================================
+  // ==========================================================
   // METHOD NOT ALLOWED
-  // ==========================================
+  // ==========================================================
 
   return res.status(405).json({
-    error: 'GET or POST only'
+    error: 'Method not allowed. Use GET or POST.'
   });
+
 };
-             
