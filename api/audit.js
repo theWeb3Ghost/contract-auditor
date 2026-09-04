@@ -26,8 +26,8 @@ const MAX_CHARS = 6000000;
 // Keep completed jobs for 30 minutes
 const JOB_TTL = 30 * 60 * 1000;
 
-// LLM timeout: 10 minutes
-const LLM_TIMEOUT = 10 * 60 * 1000;
+// LLM timeout: 30 minutes
+const LLM_TIMEOUT = 30 * 60 * 1000;
 
 
 // ============================================================
