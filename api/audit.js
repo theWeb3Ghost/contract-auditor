@@ -51,7 +51,7 @@ const llmDispatcher = new Agent({
   bodyTimeout: LLM_TIMEOUT,
 
   connect: {
-    timeout: 30000
+    timeout: 70000
   }
 });
 
